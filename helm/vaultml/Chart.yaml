@@ -1,0 +1,29 @@
+apiVersion: v2
+name: vaultml
+description: VaultML CE - Machine Learning Model Repository
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/All-Day-Developer/VaultML-CE
+sources:
+  - https://github.com/All-Day-Developer/VaultML-CE
+maintainers:
+  - name: All-Day Developer Marcin Wawrzków
+    email: marcin@all-day-developer.com
+keywords:
+  - machine-learning
+  - model-repository
+  - mlops
+  - s3
+  - postgresql
+annotations:
+  licenses: AGPL-3.0-or-later
+dependencies:
+  - name: postgresql
+    version: "12.12.10"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+  - name: minio
+    version: "12.13.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: minio.enabled
