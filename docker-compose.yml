@@ -15,6 +15,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - vaultml-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaultml -d vaultml"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   minio:
     image: minio/minio:latest
@@ -31,6 +37,12 @@ services:
       - minio_data:/data
     networks:
       - vaultml-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   vaultml:
     image: ghcr.io/all-day-developer/vaultml-ce:latest
@@ -49,8 +61,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     networks:
       - vaultml-network
     healthcheck:
