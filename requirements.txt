@@ -5,6 +5,7 @@ asyncpg==0.30.0
 boto3==1.40.6
 botocore==1.40.6
 click==8.2.1
+colorama==0.4.6
 fastapi==0.116.1
 greenlet==3.2.4
 h11==0.16.0
