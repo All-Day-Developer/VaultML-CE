@@ -18,7 +18,11 @@
 export default defineNuxtConfig({
   compatibilityDate: "2025-07-15",
   devtools: { enabled: true },
+  ssr: false,
   nitro: {
+    prerender: {
+      routes: ['/']
+    },
     devProxy: {
       "/api": {
         target: "http://localhost:8000/api", // FastAPI backend
