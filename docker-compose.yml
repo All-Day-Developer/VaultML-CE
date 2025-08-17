@@ -13,6 +13,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - vaultml-network
 
   minio:
     image: minio/minio:latest
@@ -27,6 +29,40 @@ services:
       - "9001:9001" 
     volumes:
       - minio_data:/data
+    networks:
+      - vaultml-network
+
+  vaultml:
+    image: ghcr.io/all-day-developer/vaultml-ce:latest
+    container_name: vaultml-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vaultml:vaultmlpass@postgres:5432/vaultml
+      JWT_SECRET: vaultml_jwt_secret_change_in_production
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: vaultml-models
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REGION: us-east-1
+      CORS_ORIGINS: http://localhost:3000,http://localhost:8000
+      
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - vaultml-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=10)"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+
+networks:
+  vaultml-network:
+    driver: bridge
 
 volumes:
   postgres_data:

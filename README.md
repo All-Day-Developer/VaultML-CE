@@ -60,11 +60,22 @@ VaultML CE consists of three main components:
    ```bash
    docker-compose up -d
    ```
+   
+   This will automatically pull and start:
+   - **VaultML application** (`ghcr.io/all-day-developer/vaultml-ce:latest`)
+   - **PostgreSQL database** with pre-configured credentials
+   - **MinIO S3-compatible storage** with web console
+   
+   For development with local code changes, use:
+   ```bash
+   docker-compose -f docker-compose.dev.yml up -d
+   ```
 
 3. **Access the application**
-   - Web UI: http://localhost:3000
-   - API: http://localhost:8000
-   - Default credentials: `default/default`
+   - **VaultML Web UI**: http://localhost:8000
+   - **MinIO Console**: http://localhost:9001 (minioadmin/minioadmin)
+   - **PostgreSQL**: localhost:5432 (vaultml/vaultmlpass)
+   - **Default credentials**: `default/default`
 
 ### Manual Setup
 
@@ -83,7 +94,7 @@ VaultML CE consists of three main components:
 
 3. **Start PostgreSQL and MinIO** (using Docker)
    ```bash
-   docker-compose up -d postgres minio
+   docker-compose -f docker-compose.dev.yml up -d
    ```
 
 4. **Source environment variables and run the FastAPI server**
@@ -228,10 +239,11 @@ See [helm/vaultml/README.md](helm/vaultml/README.md) for detailed configuration 
 
 ```
 VaultML-CE/
-├── app/             # FastAPI backend
-├── frontend/        # Nuxt4 frontend
-├── helm/            # Helm charts
-├── docker-compose.yml
+├── app/                    # FastAPI backend
+├── frontend/               # Nuxt4 frontend
+├── helm/                   # Helm charts
+├── docker-compose.yml      # Production setup with VaultML image
+├── docker-compose.dev.yml  # Development setup (services only)
 ├── requirements.txt
 ├── .env.example
 └── README.md
