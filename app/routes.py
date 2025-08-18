@@ -95,13 +95,13 @@ async def login(body: LoginRequest, response: Response, db: Session = Depends(ge
         samesite="lax",
         max_age=60 * 60 * 24 * 7,
         path="/",
-        domain="localhost",
+        domain=settings.DOMAIN_NAME,
     )
     return {"ok": True}
 
 @router.post("/auth/logout")
 async def logout(response: Response):
-    response.delete_cookie(JWT_COOKIE_NAME, path="/", domain="localhost")
+    response.delete_cookie(JWT_COOKIE_NAME, path="/", domain=settings.DOMAIN_NAME)
     return {"ok": True}
 
 

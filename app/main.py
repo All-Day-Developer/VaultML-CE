@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     S3_BUCKET: str
     S3_ACCESS_KEY: str
     S3_SECRET_KEY: str
+    DOMAIN_NAME: str
 
 settings = Settings()
 

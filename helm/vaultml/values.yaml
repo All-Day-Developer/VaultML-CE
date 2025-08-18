@@ -1,6 +1,6 @@
 # Default values for VaultML CE
 replicaCount: 1
-
+domainName: NOT_PRESENT
 image:
   repository: vaultml/vaultml-ce
   pullPolicy: IfNotPresent

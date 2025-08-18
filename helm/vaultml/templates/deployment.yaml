@@ -59,6 +59,8 @@ spec:
                   key: jwt-secret
             - name: S3_ENDPOINT
               value: {{ include "vaultml.s3Endpoint" . | quote }}
+            - name: DOMAIN_NAME
+              value: {{ include "vaultml.domainName" . | quote }}
             - name: S3_REGION
               value: {{ include "vaultml.s3Region" . | quote }}
             - name: S3_BUCKET
