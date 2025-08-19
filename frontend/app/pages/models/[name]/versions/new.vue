@@ -406,12 +406,15 @@ const handleUpload = async () => {
     const totalSize = files.value.reduce((sum, file) => sum + file.size, 0);
     const CHUNK_THRESHOLD = 100 * 1024 * 1024; // 100MB threshold for chunked upload
     
+    // Declare a single server-side version for the whole directory
+    const directoryVersion = await declareVersion();
+
     if (totalSize > CHUNK_THRESHOLD) {
       // Use chunked upload for large directories
-      await handleChunkedUpload();
+      await handleChunkedUpload(directoryVersion);
     } else {
       // Use traditional upload for smaller directories
-      await handleTraditionalUpload();
+      await handleTraditionalUpload(directoryVersion);
     }
     
   } catch (err: any) {
@@ -423,31 +426,37 @@ const handleUpload = async () => {
   }
 };
 
-const handleTraditionalUpload = async () => {
+const declareVersion = async () => {
+  const res = await $fetch<{ version: number; s3_prefix: string }>(
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/declare`,
+    { method: 'POST', credentials: 'include' }
+  );
+  return res.version;
+};
+
+const handleTraditionalUpload = async (directoryVersion: number) => {
   uploadProgress.value = {
     show: true,
     status: "Uploading files to server...",
     current: 0,
     total: files.value.length,
+    uploadedBytes: 0,
+    totalBytes: totalFileSize.value,
+    startTime: Date.now(),
+    currentSpeed: 0,
+    averageSpeed: 0,
+    remainingTime: 0,
+    lastUpdateTime: Date.now(),
+    lastUploadedBytes: 0,
   };
 
   const formData = new FormData();
+  formData.append('version', String(directoryVersion));
   for (const file of files.value) {
     formData.append('files', file);
   }
 
-  const versionRes = await $fetch<{
-    version: number;
-    s3_prefix: string;
-    uploaded_files: Array<{
-      filename: string;
-      size: number;
-      s3_key: string;
-      s3_url: string;
-      content_type: string;
-    }>;
-    message: string;
-  }>(
+  const versionRes = await $fetch(
     `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new`,
     {
       method: "POST",
@@ -463,12 +472,20 @@ const handleTraditionalUpload = async () => {
   navigateTo(`/models/${route.params.name}/versions`);
 };
 
-const handleChunkedUpload = async () => {
-  uploadProgress.value = {
+const handleChunkedUpload = async (directoryVersion: number) => {
+    uploadProgress.value = {
     show: true,
     status: "Processing large directory upload...",
     current: 0,
     total: files.value.length,
+    uploadedBytes: 0,
+    totalBytes: totalFileSize.value,
+    startTime: Date.now(),
+    currentSpeed: 0,
+    averageSpeed: 0,
+    remainingTime: 0,
+    lastUpdateTime: Date.now(),
+    lastUploadedBytes: 0,
   };
 
   // Create a combined file for all small files
@@ -489,21 +506,21 @@ const handleChunkedUpload = async () => {
   // Upload small files using traditional method first (if any)
   if (smallFiles.length > 0) {
     uploadProgress.value.status = `Uploading ${smallFiles.length} small files...`;
-    
     const formData = new FormData();
+    formData.append('version', String(directoryVersion));
     for (const file of smallFiles) {
       formData.append('files', file);
     }
 
     await $fetch(
-      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new`,
+      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new?version=${directoryVersion}`,
       {
-        method: "POST", 
+        method: "POST",
         body: formData,
         credentials: "include",
       }
     );
-    
+
     completedFiles += smallFiles.length;
     uploadProgress.value.current = completedFiles;
   }
@@ -511,11 +528,12 @@ const handleChunkedUpload = async () => {
   // Upload large files one by one using chunked upload
   for (const file of largeFiles) {
     const filename = (file as any).webkitRelativePath || file.name;
-    
+
     uploadProgress.value.status = `Uploading large file: ${filename}...`;
-    
-    await uploadFileInChunks(file, filename);
-    
+
+  // upload large file into the same directory version
+  await uploadFileInChunks(file, filename, directoryVersion);
+
     completedFiles++;
     uploadProgress.value.current = completedFiles;
   }
@@ -525,15 +543,20 @@ const handleChunkedUpload = async () => {
   navigateTo(`/models/${route.params.name}/versions`);
 };
 
-const uploadFileInChunks = async (file: File, filename: string) => {
-  // Initiate chunked upload for this specific file
+const uploadFileInChunks = async (file: File, filename: string, version?: number) => {
+  // Ensure we have a server-side version to upload into
+  let activeVersion = version;
+  if (!activeVersion) {
+    activeVersion = await declareVersion();
+  }
+
+  // Initiate chunked upload for this specific file (version passed as query param)
   const initResponse = await $fetch<{
-    version: number;
     s3_prefix: string;
     chunk_size: number;
     max_chunks: number;
   }>(
-    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/chunked/initiate`,
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunked/initiate`,
     {
       method: "POST",
       body: {
@@ -557,7 +580,7 @@ const uploadFileInChunks = async (file: File, filename: string) => {
     formData.append('chunk', chunk, `chunk-${i + 1}`);
     
     await $fetch(
-      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${initResponse.version}/chunks/${i + 1}`,
+      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunks/${i + 1}`,
       {
         method: "PUT",
         body: formData,
@@ -568,7 +591,7 @@ const uploadFileInChunks = async (file: File, filename: string) => {
   
   // Complete the chunked upload for this file
   await $fetch(
-    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${initResponse.version}/chunked/complete`,
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunked/complete`,
     {
       method: "POST",
       credentials: "include",

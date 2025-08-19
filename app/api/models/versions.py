@@ -14,16 +14,13 @@ from app.s3 import presign_put, upload_file, presign_get, create_multipart_uploa
 from app.api import router
 from app.api.auth import current_user_id
 
-
-
-@router.post("/models/{name}/versions/new")
-async def create_version(
+@router.post("/models/{name}/versions/declare")
+async def declare_version(
     name: str,
-    files: List[UploadFile] = File(...),
     uid: int = Depends(current_user_id),
-    db: Session = Depends(get_db),
+    db = Depends(get_db),
 ):
-    """Create a new version by uploading files directly to the backend"""
+    """Declare a new version for a model"""
     m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
     if not m:
         raise HTTPException(404, "Model not found")
@@ -42,9 +39,39 @@ async def create_version(
     db.add(mv)
     await db.commit()
 
+    return {
+        "version": ver,
+        "s3_prefix": prefix,
+        "message": f"Declared new version {ver} for model {name}"
+    }
+
+@router.post("/models/{name}/versions/new")
+async def create_version(
+    name: str,
+    version: int,
+    files: List[UploadFile] = File(...),
+    uid: int = Depends(current_user_id),
+    db = Depends(get_db),
+):
+    """Create a new version by uploading files directly to the backend"""
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+    
+    # Require that the client previously declared this version
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not declared")
+
     
     uploaded_files = []
     try:
+        prefix = mv.s3_prefix
         for file in files:
             
             file_content = await file.read()
@@ -74,161 +101,53 @@ async def create_version(
         raise HTTPException(500, f"File upload failed: {str(e)}")
 
     return {
-        "version": ver,
-        "s3_prefix": prefix,
+        "version": version,
+        "s3_prefix": mv.s3_prefix,
         "uploaded_files": uploaded_files,
-        "message": f"Successfully uploaded {len(uploaded_files)} files for version {ver}"
+        "message": f"Successfully uploaded {len(uploaded_files)} files for version {version}"
     }
 
-@router.get("/models/{name}/versions/{version}/download")
-async def list_version_files(
-    name: str,
-    version: int,
-    db: Session = Depends(get_db),
-):
-    """List files in a version for download"""
-    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
-    if not m:
-        raise HTTPException(404, "Model not found")
-
-    mv = (await db.execute(
-        select(ModelVersion).where(
-            ModelVersion.model_id == m.id,
-            ModelVersion.version == version
-        )
-    )).scalar_one_or_none()
-    if not mv:
-        raise HTTPException(404, "Version not found")
-
-    
-    from botocore.exceptions import ClientError
-    from app.s3 import s3_client
-    s3 = s3_client()
-    
-    try:
-        response = s3.list_objects_v2(
-            Bucket=settings.S3_BUCKET,
-            Prefix=f"{mv.s3_prefix}/"
-        )
-        
-        if 'Contents' not in response:
-            return {
-                "version": version,
-                "s3_prefix": mv.s3_prefix,
-                "files": [],
-                "message": "No files found for this version"
-            }
-        
-        files = []
-        for obj in response['Contents']:
-            key = obj['Key']
-            filename = key.split('/')[-1]  
-            if filename:  
-                files.append({
-                    "filename": filename,
-                    "size": obj['Size'],
-                    "last_modified": obj['LastModified'].isoformat(),
-                    "s3_key": key,
-                    "download_url": f"/api/models/{name}/versions/{version}/download/{filename}"
-                })
-        
-        return {
-            "version": version,
-            "s3_prefix": mv.s3_prefix,
-            "files": files,
-            "message": f"Found {len(files)} files for download"
-        }
-        
-    except ClientError as e:
-        raise HTTPException(500, f"Failed to list files: {str(e)}")
-
-@router.get("/models/{name}/versions/{version}/download/{filename}")
-async def download_file(
-    name: str,
-    version: int,
-    filename: str,
-    db: Session = Depends(get_db),
-):
-    """Download a specific file from a version"""
-    from fastapi.responses import StreamingResponse
-    import io
-    
-    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
-    if not m:
-        raise HTTPException(404, "Model not found")
-
-    mv = (await db.execute(
-        select(ModelVersion).where(
-            ModelVersion.model_id == m.id,
-            ModelVersion.version == version
-        )
-    )).scalar_one_or_none()
-    if not mv:
-        raise HTTPException(404, "Version not found")
-
-    
-    from botocore.exceptions import ClientError
-    from app.s3 import s3_client
-    s3 = s3_client()
-    
-    try:
-        key = f"{mv.s3_prefix}/{filename}"
-        response = s3.get_object(Bucket=settings.S3_BUCKET, Key=key)
-        
-        
-        def generate():
-            for chunk in response['Body'].iter_chunks(chunk_size=8192):
-                yield chunk
-        
-        return StreamingResponse(
-            generate(),
-            media_type=response.get('ContentType', 'application/octet-stream'),
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-        
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchKey':
-            raise HTTPException(404, f"File {filename} not found")
-        raise HTTPException(500, f"Failed to download file: {str(e)}")
-    
 
 class InitiateMultipartRequest(BaseModel):
     filename: str
     content_type: str = "application/octet-stream"
 
 
-@router.post("/models/{name}/versions/chunked/initiate")
+@router.post("/models/{name}/versions/{version}/chunked/initiate")
 async def initiate_chunked_upload(
     name: str,
     version: int,
     body: InitiateMultipartRequest,
     uid: int = Depends(current_user_id),
-    db: Session = Depends(get_db)
+    db = Depends(get_db)
 ):
     """Initiate chunked upload for a new version"""
     m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
     if not m:
         raise HTTPException(404, "Model not found")
+    # The version must already be declared by the client. Update its tags to mark chunked upload.
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not declared")
 
-    last = (await db.execute(
-        select(ModelVersion)
-        .where(ModelVersion.model_id == m.id)
-        .order_by(ModelVersion.version.desc())
-    )).scalars().first()
-    ver = (last.version + 1) if last else 1
-
-    prefix = f"{name}/versions/{ver}"
-    
     try:
-        mv = ModelVersion(model_id=m.id, version=ver, s3_prefix=prefix, tags={
+        prefix = mv.s3_prefix
+        # Update tags on the existing ModelVersion to indicate a chunked upload is in progress
+        tags = mv.tags.copy() if mv.tags else {}
+        tags.update({
             "chunked_upload": True,
             "filename": body.filename,
             "content_type": body.content_type,
             "status": "uploading"
         })
-        db.add(mv)
+        mv.tags = tags
         await db.commit()
-        
+
         return {
             "s3_prefix": prefix,
             "chunk_size": 100 * 1024 * 1024,  # 100MB recommended
@@ -244,7 +163,7 @@ async def upload_chunk(
     chunk_number: int,
     chunk: UploadFile = File(...),
     uid: int = Depends(current_user_id),
-    db: Session = Depends(get_db),
+    db = Depends(get_db),
 ):
     """Upload a file chunk to be stored temporarily and combined later"""
     if chunk_number < 1 or chunk_number > 10000:
@@ -308,7 +227,7 @@ async def complete_chunked_upload(
     name: str,
     version: int,
     uid: int = Depends(current_user_id),
-    db: Session = Depends(get_db),
+    db = Depends(get_db),
 ):
     """Combine all uploaded chunks and upload complete file to S3"""
     m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
@@ -429,7 +348,7 @@ async def abort_chunked_upload(
     name: str,
     version: int,
     uid: int = Depends(current_user_id),
-    db: Session = Depends(get_db),
+    db = Depends(get_db),
 ):
     """Abort chunked upload and clean up temporary files"""
     m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
@@ -485,3 +404,116 @@ async def list_ongoing_uploads(uid: int = Depends(current_user_id)):
         return uploads
     except Exception as e:
         raise HTTPException(500, f"Failed to list uploads: {str(e)}")
+    
+
+@router.get("/models/{name}/versions/{version}/download")
+async def list_version_files(
+    name: str,
+    version: int,
+    db = Depends(get_db),
+):
+    """List files in a version for download"""
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not found")
+
+    
+    from botocore.exceptions import ClientError
+    from app.s3 import s3_client
+    s3 = s3_client()
+    
+    try:
+        response = s3.list_objects_v2(
+            Bucket=settings.S3_BUCKET,
+            Prefix=f"{mv.s3_prefix}/"
+        )
+        
+        if 'Contents' not in response:
+            return {
+                "version": version,
+                "s3_prefix": mv.s3_prefix,
+                "files": [],
+                "message": "No files found for this version"
+            }
+        
+        files = []
+        for obj in response['Contents']:
+            key = obj['Key']
+            filename = key.split('/')[-1]  
+            if filename:  
+                files.append({
+                    "filename": filename,
+                    "size": obj['Size'],
+                    "last_modified": obj['LastModified'].isoformat(),
+                    "s3_key": key,
+                    "download_url": f"/api/models/{name}/versions/{version}/download/{filename}"
+                })
+        
+        return {
+            "version": version,
+            "s3_prefix": mv.s3_prefix,
+            "files": files,
+            "message": f"Found {len(files)} files for download"
+        }
+        
+    except ClientError as e:
+        raise HTTPException(500, f"Failed to list files: {str(e)}")
+
+@router.get("/models/{name}/versions/{version}/download/{filename}")
+async def download_file(
+    name: str,
+    version: int,
+    filename: str,
+    db = Depends(get_db),
+):
+    """Download a specific file from a version"""
+    from fastapi.responses import StreamingResponse
+    import io
+    
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not found")
+
+    
+    from botocore.exceptions import ClientError
+    from app.s3 import s3_client
+    s3 = s3_client()
+    
+    try:
+        key = f"{mv.s3_prefix}/{filename}"
+        response = s3.get_object(Bucket=settings.S3_BUCKET, Key=key)
+        
+        
+        def generate():
+            for chunk in response['Body'].iter_chunks(chunk_size=8192):
+                yield chunk
+        
+        return StreamingResponse(
+            generate(),
+            media_type=response.get('ContentType', 'application/octet-stream'),
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            raise HTTPException(404, f"File {filename} not found")
+        raise HTTPException(500, f"Failed to download file: {str(e)}")
+    
