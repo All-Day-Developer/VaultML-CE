@@ -67,3 +67,53 @@ def presign_get(key: str, expires=3600):
         ExpiresIn=expires,
     )
 
+def create_multipart_upload(key: str, content_type: str = "application/octet-stream"):
+    """Initiate a multipart upload"""
+    ensure_bucket_exists()
+    s3 = s3_client()
+    response = s3.create_multipart_upload(
+        Bucket=settings.S3_BUCKET,
+        Key=key,
+        ContentType=content_type
+    )
+    return response['UploadId']
+
+def presign_upload_part(key: str, upload_id: str, part_number: int, expires=3600):
+    """Generate presigned URL for uploading a part"""
+    s3 = s3_client()
+    return s3.generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": settings.S3_BUCKET,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number
+        },
+        ExpiresIn=expires,
+    )
+
+def complete_multipart_upload(key: str, upload_id: str, parts):
+    """Complete a multipart upload"""
+    s3 = s3_client()
+    response = s3.complete_multipart_upload(
+        Bucket=settings.S3_BUCKET,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={'Parts': parts}
+    )
+    return response
+
+def abort_multipart_upload(key: str, upload_id: str):
+    """Abort a multipart upload"""
+    s3 = s3_client()
+    s3.abort_multipart_upload(
+        Bucket=settings.S3_BUCKET,
+        Key=key,
+        UploadId=upload_id
+    )
+
+def list_multipart_uploads():
+    """List ongoing multipart uploads"""
+    s3 = s3_client()
+    return s3.list_multipart_uploads(Bucket=settings.S3_BUCKET)
+

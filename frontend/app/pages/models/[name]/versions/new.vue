@@ -115,10 +115,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
                 </svg>
                 <div class="flex-1">
                   <p class="text-sm font-medium text-green-800 dark:text-green-200">
-                    {{ files.length }} file(s) selected
+                    {{ files.length }} file(s) selected ({{ formatFileSize(totalFileSize) }})
                   </p>
                   <p class="text-sm text-green-600 dark:text-green-300 mt-1">
                     Ready to upload as version {{ nextVersion }}
+                    <span v-if="totalFileSize > 100 * 1024 * 1024" class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 ml-2">
+                      Chunked Upload
+                    </span>
                   </p>
                   <details class="mt-2">
                     <summary class="text-sm text-green-700 dark:text-green-300 cursor-pointer hover:text-green-800 dark:hover:text-green-200">
@@ -126,8 +129,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
                     </summary>
                     <div class="mt-2 max-h-40 overflow-y-auto">
                       <ul class="text-sm text-green-600 dark:text-green-400 space-y-1">
-                        <li v-for="file in files.slice(0, 20)" :key="file.name" class="font-mono text-xs">
-                          {{ (file as any).webkitRelativePath || file.name }}
+                        <li v-for="file in files.slice(0, 20)" :key="file.name" class="font-mono text-xs flex justify-between">
+                          <span>{{ (file as any).webkitRelativePath || file.name }}</span>
+                          <span class="text-green-500">{{ formatFileSize(file.size) }}</span>
                         </li>
                         <li v-if="files.length > 20" class="italic">
                           ... and {{ files.length - 20 }} more files
@@ -244,6 +248,15 @@ const uploadProgress = ref({
   status: "",
   current: 0,
   total: 0,
+  // Speed and time tracking
+  uploadedBytes: 0,
+  totalBytes: 0,
+  startTime: 0,
+  currentSpeed: 0, // bytes per second
+  averageSpeed: 0, // bytes per second
+  remainingTime: 0, // seconds
+  lastUpdateTime: 0,
+  lastUploadedBytes: 0,
 });
 
 
@@ -280,6 +293,80 @@ const latestVersion = computed(() => {
 
 const nextVersion = computed(() => latestVersion.value + 1);
 
+const totalFileSize = computed(() => {
+  return files.value.reduce((sum, file) => sum + file.size, 0);
+});
+
+const formatFileSize = (bytes: number): string => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unitIndex = 0;
+  
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  
+  return `${size.toFixed(1)} ${units[unitIndex]}`;
+};
+
+const formatSpeed = (bytesPerSecond: number): string => {
+  return `${formatFileSize(bytesPerSecond)}/s`;
+};
+
+const formatTime = (seconds: number): string => {
+  if (!isFinite(seconds) || seconds <= 0) return '--:--';
+  
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
+};
+
+const updateUploadProgress = (completedFiles: number, totalFiles: number, uploadedBytes: number, totalBytes: number) => {
+  const now = Date.now();
+  
+  if (uploadProgress.value.startTime === 0) {
+    uploadProgress.value.startTime = now;
+    uploadProgress.value.lastUpdateTime = now;
+    uploadProgress.value.lastUploadedBytes = 0;
+  }
+  
+  uploadProgress.value.current = completedFiles;
+  uploadProgress.value.total = totalFiles;
+  uploadProgress.value.uploadedBytes = uploadedBytes;
+  uploadProgress.value.totalBytes = totalBytes;
+  
+  // Calculate speeds
+  const timeDiffSeconds = (now - uploadProgress.value.lastUpdateTime) / 1000;
+  const bytesDiff = uploadedBytes - uploadProgress.value.lastUploadedBytes;
+  
+  if (timeDiffSeconds > 0) {
+    // Current speed (based on recent progress)
+    uploadProgress.value.currentSpeed = bytesDiff / timeDiffSeconds;
+    
+    // Average speed (based on total progress)
+    const totalTimeSeconds = (now - uploadProgress.value.startTime) / 1000;
+    if (totalTimeSeconds > 0) {
+      uploadProgress.value.averageSpeed = uploadedBytes / totalTimeSeconds;
+    }
+    
+    // Calculate remaining time based on average speed
+    const remainingBytes = totalBytes - uploadedBytes;
+    if (uploadProgress.value.averageSpeed > 0) {
+      uploadProgress.value.remainingTime = remainingBytes / uploadProgress.value.averageSpeed;
+    }
+  }
+  
+  // Update tracking values
+  uploadProgress.value.lastUpdateTime = now;
+  uploadProgress.value.lastUploadedBytes = uploadedBytes;
+};
+
 
 const isDirectorySelection = (list: File[]) =>
   list.length > 0 &&
@@ -315,47 +402,20 @@ const handleUpload = async () => {
       throw new Error("Please select files to upload");
     }
 
+    // Calculate total size to decide upload method
+    const totalSize = files.value.reduce((sum, file) => sum + file.size, 0);
+    const CHUNK_THRESHOLD = 100 * 1024 * 1024; // 100MB threshold for chunked upload
     
-    uploadProgress.value = {
-      show: true,
-      status: "Uploading files to server...",
-      current: 0,
-      total: files.value.length,
-    };
+    // Declare a single server-side version for the whole directory
+    const directoryVersion = await declareVersion();
 
-    
-    const formData = new FormData();
-    for (const file of files.value) {
-      formData.append('files', file);
+    if (totalSize > CHUNK_THRESHOLD) {
+      // Use chunked upload for large directories
+      await handleChunkedUpload(directoryVersion);
+    } else {
+      // Use traditional upload for smaller directories
+      await handleTraditionalUpload(directoryVersion);
     }
-
-    
-    const versionRes = await $fetch<{
-      version: number;
-      s3_prefix: string;
-      uploaded_files: Array<{
-        filename: string;
-        size: number;
-        s3_key: string;
-        s3_url: string;
-        content_type: string;
-      }>;
-      message: string;
-    }>(
-      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new`,
-      {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      },
-    );
-
-    uploadProgress.value.current = files.value.length;
-    uploadProgress.value.status = "Upload completed successfully!";
-
-    
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    navigateTo(`/models/${route.params.name}/versions`);
     
   } catch (err: any) {
     console.error("Version creation error:", err);
@@ -364,5 +424,178 @@ const handleUpload = async () => {
     loading.value = false;
     uploadProgress.value.show = false;
   }
+};
+
+const declareVersion = async () => {
+  const res = await $fetch<{ version: number; s3_prefix: string }>(
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/declare`,
+    { method: 'POST', credentials: 'include' }
+  );
+  return res.version;
+};
+
+const handleTraditionalUpload = async (directoryVersion: number) => {
+  uploadProgress.value = {
+    show: true,
+    status: "Uploading files to server...",
+    current: 0,
+    total: files.value.length,
+    uploadedBytes: 0,
+    totalBytes: totalFileSize.value,
+    startTime: Date.now(),
+    currentSpeed: 0,
+    averageSpeed: 0,
+    remainingTime: 0,
+    lastUpdateTime: Date.now(),
+    lastUploadedBytes: 0,
+  };
+
+  const formData = new FormData();
+  formData.append('version', String(directoryVersion));
+  for (const file of files.value) {
+    formData.append('files', file);
+  }
+
+  const versionRes = await $fetch(
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new`,
+    {
+      method: "POST",
+      body: formData,
+      credentials: "include",
+    },
+  );
+
+  uploadProgress.value.current = files.value.length;
+  uploadProgress.value.status = "Upload completed successfully!";
+
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  navigateTo(`/models/${route.params.name}/versions`);
+};
+
+const handleChunkedUpload = async (directoryVersion: number) => {
+    uploadProgress.value = {
+    show: true,
+    status: "Processing large directory upload...",
+    current: 0,
+    total: files.value.length,
+    uploadedBytes: 0,
+    totalBytes: totalFileSize.value,
+    startTime: Date.now(),
+    currentSpeed: 0,
+    averageSpeed: 0,
+    remainingTime: 0,
+    lastUpdateTime: Date.now(),
+    lastUploadedBytes: 0,
+  };
+
+  // Create a combined file for all small files
+  const smallFiles: File[] = [];
+  const largeFiles: File[] = [];
+  
+  // Separate files by size
+  for (const file of files.value) {
+    if (file.size > 50 * 1024 * 1024) { // 50MB threshold
+      largeFiles.push(file);
+    } else {
+      smallFiles.push(file);
+    }
+  }
+
+  let completedFiles = 0;
+
+  // Upload small files using traditional method first (if any)
+  if (smallFiles.length > 0) {
+    uploadProgress.value.status = `Uploading ${smallFiles.length} small files...`;
+    const formData = new FormData();
+    formData.append('version', String(directoryVersion));
+    for (const file of smallFiles) {
+      formData.append('files', file);
+    }
+
+    await $fetch(
+      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/new?version=${directoryVersion}`,
+      {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      }
+    );
+
+    completedFiles += smallFiles.length;
+    uploadProgress.value.current = completedFiles;
+  }
+
+  // Upload large files one by one using chunked upload
+  for (const file of largeFiles) {
+    const filename = (file as any).webkitRelativePath || file.name;
+
+    uploadProgress.value.status = `Uploading large file: ${filename}...`;
+
+  // upload large file into the same directory version
+  await uploadFileInChunks(file, filename, directoryVersion);
+
+    completedFiles++;
+    uploadProgress.value.current = completedFiles;
+  }
+
+  uploadProgress.value.status = "All files uploaded successfully!";
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  navigateTo(`/models/${route.params.name}/versions`);
+};
+
+const uploadFileInChunks = async (file: File, filename: string, version?: number) => {
+  // Ensure we have a server-side version to upload into
+  let activeVersion = version;
+  if (!activeVersion) {
+    activeVersion = await declareVersion();
+  }
+
+  // Initiate chunked upload for this specific file (version passed as query param)
+  const initResponse = await $fetch<{
+    s3_prefix: string;
+    chunk_size: number;
+    max_chunks: number;
+  }>(
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunked/initiate`,
+    {
+      method: "POST",
+      body: {
+        filename: filename,
+        content_type: file.type || 'application/octet-stream'
+      },
+      credentials: "include",
+    }
+  );
+
+  const chunkSize = 100 * 1024 * 1024; // 100MB chunks
+  const totalChunks = Math.ceil(file.size / chunkSize);
+  
+  // Upload chunks sequentially
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, file.size);
+    const chunk = file.slice(start, end);
+    
+    const formData = new FormData();
+    formData.append('chunk', chunk, `chunk-${i + 1}`);
+    
+    await $fetch(
+      `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunks/${i + 1}`,
+      {
+        method: "PUT",
+        body: formData,
+        credentials: "include",
+      }
+    );
+  }
+  
+  // Complete the chunked upload for this file
+  await $fetch(
+    `${config.public.apiBase}/models/${encodeURIComponent(modelName)}/versions/${activeVersion}/chunked/complete`,
+    {
+      method: "POST",
+      credentials: "include",
+    }
+  );
 };
 </script>

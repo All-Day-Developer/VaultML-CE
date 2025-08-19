@@ -20,12 +20,13 @@ import logging
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import os
-from .routes import router
-from .main import init_db, Session, User
 from passlib.hash import bcrypt
 from sqlalchemy import select
 from fastapi import FastAPI, Request
 from colorama import Fore, Style, init as colorama_init
+from app.api import router
+from app.main import Session, init_db
+from app.model.user import User
 colorama_init(autoreset=True)
 
 _BANNER_PRINTED = False

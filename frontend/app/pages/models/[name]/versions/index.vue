@@ -409,7 +409,8 @@ const setAlias = (versionNumber?: number) => {
                   method: 'POST',
                   credentials: 'include'
                 });
-                await refreshCookie(aliases);
+                // Refresh aliases list
+                aliases.value = await $fetch(`${config.public.apiBase}/models/${encodeURIComponent(modelName)}/aliases`, { credentials: 'include', default: () => [] });
                 notifications.success('Alias Set', `Successfully set @${aliasField.value} to version ${versionField.value}`);
               } catch (error: any) {
                 notifications.error('Failed to Set Alias', error.message);
@@ -434,7 +435,8 @@ const deleteAlias = async (aliasName: string) => {
           method: "DELETE",
           credentials: "include"
         });
-        await refreshCookie(aliases);
+        // Refresh aliases list
+        aliases.value = await $fetch(`${config.public.apiBase}/models/${encodeURIComponent(modelName)}/aliases`, { credentials: 'include', default: () => [] });
         notifications.success('Alias Deleted', `Successfully deleted alias @${aliasName}`);
       } catch (error: any) {
         notifications.error('Failed to Delete Alias', error.message);
