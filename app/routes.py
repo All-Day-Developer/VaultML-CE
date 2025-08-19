@@ -16,6 +16,9 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Response, Cookie, Request, UploadFile, File
+from fastapi.responses import StreamingResponse
+import tempfile
+import os
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -25,7 +28,7 @@ from .main import (
     Session, get_db, make_jwt, read_jwt,
     User, Model, ModelVersion, ModelAlias, settings
 )
-from .s3 import presign_put, upload_file, presign_get
+from .s3 import presign_put, upload_file, presign_get, create_multipart_upload, presign_upload_part, complete_multipart_upload, abort_multipart_upload, list_multipart_uploads
 
 router = APIRouter(prefix="/api")
 
@@ -770,6 +773,300 @@ async def dashboard_stats(uid: int = Depends(current_user_id), db: Session = Dep
             for version, model in latest_versions
         ]
     }
+
+class InitiateMultipartRequest(BaseModel):
+    filename: str
+    content_type: str = "application/octet-stream"
+
+
+@router.post("/models/{name}/versions/chunked/initiate")
+async def initiate_chunked_upload(
+    name: str,
+    body: InitiateMultipartRequest,
+    uid: int = Depends(current_user_id),
+    db: Session = Depends(get_db),
+    version: int
+):
+    """Initiate chunked upload for a new version"""
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    last = (await db.execute(
+        select(ModelVersion)
+        .where(ModelVersion.model_id == m.id)
+        .order_by(ModelVersion.version.desc())
+    )).scalars().first()
+    ver = (last.version + 1) if last else 1
+
+    prefix = f"{name}/versions/{ver}"
+    
+    try:
+        mv = ModelVersion(model_id=m.id, version=ver, s3_prefix=prefix, tags={
+            "chunked_upload": True,
+            "filename": body.filename,
+            "content_type": body.content_type,
+            "status": "uploading"
+        })
+        db.add(mv)
+        await db.commit()
+        
+        return {
+            "s3_prefix": prefix,
+            "chunk_size": 100 * 1024 * 1024,  # 100MB recommended
+            "max_chunks": 10000
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to initiate chunked upload: {str(e)}")
+
+@router.put("/models/{name}/versions/{version}/chunks/{chunk_number}")
+async def upload_chunk(
+    name: str,
+    version: int,
+    chunk_number: int,
+    chunk: UploadFile = File(...),
+    uid: int = Depends(current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Upload a file chunk to be stored temporarily and combined later"""
+    if chunk_number < 1 or chunk_number > 10000:
+        raise HTTPException(400, "Chunk number must be between 1 and 10000")
+    
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not found")
+    
+    if not mv.tags.get("chunked_upload"):
+        raise HTTPException(400, "Invalid chunked upload")
+    
+    try:
+        # Create a directory for storing chunks for this upload
+        chunks_dir = f"/tmp/vaultml_chunks/{name}_v{version}"
+        os.makedirs(chunks_dir, exist_ok=True)
+        
+        chunk_file_path = f"{chunks_dir}/chunk_{chunk_number:06d}"
+        
+        # Save chunk to temporary file
+        with open(chunk_file_path, 'wb') as chunk_file:
+            chunk_size = 8192  # 8KB chunks for streaming
+            total_size = 0
+            
+            while chunk_data := await chunk.read(chunk_size):
+                chunk_file.write(chunk_data)
+                total_size += len(chunk_data)
+        
+        # Store chunk info in the model version tags
+        # Need to reassign the entire tags dict for SQLAlchemy to detect changes
+        tags = mv.tags.copy()
+        if 'uploaded_chunks' not in tags:
+            tags['uploaded_chunks'] = {}
+        tags['uploaded_chunks'][str(chunk_number)] = {
+            'file_path': chunk_file_path,
+            'size': total_size
+        }
+        mv.tags = tags
+        await db.commit()
+        
+        return {
+            "chunk_number": chunk_number,
+            "size": total_size,
+            "message": f"Chunk {chunk_number} uploaded successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Failed to upload chunk {chunk_number}: {str(e)}")
+
+@router.post("/models/{name}/versions/{version}/chunked/complete")
+async def complete_chunked_upload(
+    name: str,
+    version: int,
+    uid: int = Depends(current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Combine all uploaded chunks and upload complete file to S3"""
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not found")
+    
+    if not mv.tags.get("chunked_upload"):
+        raise HTTPException(400, "Invalid chunked upload")
+    
+    filename = mv.tags.get("filename")
+    content_type = mv.tags.get("content_type", "application/octet-stream")
+    key = f"{mv.s3_prefix}/{filename}"
+    uploaded_chunks = mv.tags.get("uploaded_chunks", {})
+    
+    if not uploaded_chunks:
+        raise HTTPException(400, "No chunks uploaded yet")
+    
+    try:
+        # Sort chunks by chunk number
+        chunk_numbers = sorted([int(num) for num in uploaded_chunks.keys()])
+        
+        # Create temporary file to combine all chunks
+        with tempfile.NamedTemporaryFile(delete=False) as combined_file:
+            try:
+                total_size = 0
+                
+                # Combine all chunks into one file
+                for chunk_num in chunk_numbers:
+                    chunk_info = uploaded_chunks[str(chunk_num)]
+                    chunk_file_path = chunk_info['file_path']
+                    
+                    if not os.path.exists(chunk_file_path):
+                        raise HTTPException(500, f"Chunk {chunk_num} file not found")
+                    
+                    # Copy chunk data to combined file
+                    with open(chunk_file_path, 'rb') as chunk_file:
+                        while chunk_data := chunk_file.read(8192):
+                            combined_file.write(chunk_data)
+                            total_size += len(chunk_data)
+                
+                combined_file.flush()
+                
+                # Upload the complete file to S3
+                from .s3 import upload_file
+                
+                with open(combined_file.name, 'rb') as complete_file:
+                    file_content = complete_file.read()
+                    s3_url = upload_file(
+                        file_content=file_content,
+                        key=key,
+                        content_type=content_type
+                    )
+                
+                # Clean up chunk files and directory
+                chunks_dir = f"/tmp/vaultml_chunks/{name}_v{version}"
+                try:
+                    # First, remove all chunk files
+                    for chunk_num in chunk_numbers:
+                        chunk_info = uploaded_chunks[str(chunk_num)]
+                        chunk_file_path = chunk_info['file_path']
+                        if os.path.exists(chunk_file_path):
+                            os.unlink(chunk_file_path)
+                    
+                    # Then remove any remaining files in the directory
+                    if os.path.exists(chunks_dir):
+                        import shutil
+                        shutil.rmtree(chunks_dir)
+                        
+                except Exception as cleanup_error:
+                    # Log cleanup error but don't fail the upload
+                    print(f"Warning: Failed to cleanup chunks directory: {cleanup_error}")
+                    # Continue with the upload completion
+                
+                # Update model version status
+                # Need to reassign the entire tags dict for SQLAlchemy to detect changes
+                tags = mv.tags.copy()
+                tags.update({
+                    "status": "completed",
+                    "s3_url": s3_url,
+                    "total_size": total_size,
+                    "total_chunks": len(chunk_numbers)
+                })
+                # Clear chunk info since we don't need it anymore
+                if 'uploaded_chunks' in tags:
+                    del tags['uploaded_chunks']
+                mv.tags = tags
+                await db.commit()
+                
+                return {
+                    "version": version,
+                    "s3_key": key,
+                    "s3_prefix": mv.s3_prefix,
+                    "s3_url": s3_url,
+                    "total_size": total_size,
+                    "total_chunks": len(chunk_numbers),
+                    "message": f"Successfully combined {len(chunk_numbers)} chunks and uploaded to S3"
+                }
+                
+            finally:
+                # Clean up combined temp file
+                if os.path.exists(combined_file.name):
+                    os.unlink(combined_file.name)
+        
+    except Exception as e:
+        raise HTTPException(500, f"Failed to complete chunked upload: {str(e)}")
+
+@router.delete("/models/{name}/versions/{version}/chunked/abort")
+async def abort_chunked_upload(
+    name: str,
+    version: int,
+    uid: int = Depends(current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Abort chunked upload and clean up temporary files"""
+    m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
+    if not m:
+        raise HTTPException(404, "Model not found")
+
+    mv = (await db.execute(
+        select(ModelVersion).where(
+            ModelVersion.model_id == m.id,
+            ModelVersion.version == version
+        )
+    )).scalar_one_or_none()
+    if not mv:
+        raise HTTPException(404, "Version not found")
+    
+    if not mv.tags.get("chunked_upload"):
+        raise HTTPException(400, "Invalid chunked upload")
+    
+    try:
+        # Clean up any uploaded chunks
+        uploaded_chunks = mv.tags.get("uploaded_chunks", {})
+        chunks_dir = f"/tmp/vaultml_chunks/{name}_v{version}"
+        
+        try:
+            # Remove individual chunk files first
+            for chunk_num, chunk_info in uploaded_chunks.items():
+                chunk_file_path = chunk_info['file_path']
+                if os.path.exists(chunk_file_path):
+                    os.unlink(chunk_file_path)
+            
+            # Remove entire directory and any remaining files
+            if os.path.exists(chunks_dir):
+                import shutil
+                shutil.rmtree(chunks_dir)
+                
+        except Exception as cleanup_error:
+            # Log cleanup error but don't fail the abort
+            print(f"Warning: Failed to cleanup chunks during abort: {cleanup_error}")
+        
+        # Delete the model version record
+        await db.delete(mv)
+        await db.commit()
+        
+        return {"message": "Chunked upload aborted successfully"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to abort chunked upload: {str(e)}")
+
+@router.get("/multipart/uploads")
+async def list_ongoing_uploads(uid: int = Depends(current_user_id)):
+    """List ongoing multipart uploads"""
+    try:
+        uploads = list_multipart_uploads()
+        return uploads
+    except Exception as e:
+        raise HTTPException(500, f"Failed to list uploads: {str(e)}")
 
 @router.get("/health")
 async def health():
