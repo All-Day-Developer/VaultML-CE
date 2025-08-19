@@ -16,7 +16,7 @@
 
 import uvicorn, asyncio
 from fastapi import FastAPI
-from .routes import router
+from app.api import router
 from .main import init_db
 
 app = FastAPI(title="ModelHub")

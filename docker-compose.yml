@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -45,21 +43,26 @@ services:
       start_period: 30s
 
   vaultml:
-    image: ghcr.io/all-day-developer/vaultml-ce:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: vaultml-app
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://vaultml:vaultmlpass@postgres:5432/vaultml
-      JWT_SECRET: vaultml_jwt_secret_change_in_production
+      JWT_SECRET: supersecretjwtkey
       S3_ENDPOINT: http://minio:9000
-      S3_BUCKET: vaultml-models
+      S3_BUCKET: models
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_REGION: us-east-1
+      DOMAIN_NAME: localhost
       CORS_ORIGINS: http://localhost:3000,http://localhost:8000
       
     ports:
       - "8000:8000"
+    volumes:
+      - vaultml_chunks:/tmp/vaultml_chunks
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,3 +84,4 @@ networks:
 volumes:
   postgres_data:
   minio_data:
+  vaultml_chunks:

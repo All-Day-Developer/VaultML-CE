@@ -54,9 +54,13 @@ COPY app/ ./app/
 # Copy built frontend from builder stage
 COPY --from=frontend-builder /frontend/.output/public ./static/
 
+# Create directory for chunk uploads and ensure proper permissions
+RUN mkdir -p /tmp/vaultml_chunks
+
 # Create non-root user
 RUN groupadd -r vaultml && useradd -r -g vaultml vaultml
 RUN chown -R vaultml:vaultml /app
+RUN chown -R vaultml:vaultml /tmp/vaultml_chunks
 USER vaultml
 
 # Expose port

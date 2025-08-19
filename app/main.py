@@ -27,6 +27,8 @@ from typing import Dict
 import time, jwt
 from fastapi import HTTPException
 
+from app.model.base import Base
+
 class Settings(BaseSettings):
     DATABASE_URL: str
     JWT_SECRET: str
@@ -43,45 +45,6 @@ settings = Settings()
 engine = create_async_engine(settings.DATABASE_URL, echo=False)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
-class Base(DeclarativeBase):
-    pass
-
-class User(Base):
-    __tablename__ = "users"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    username: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
-    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-class Model(Base):
-    __tablename__ = "models"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    group_name: Mapped[str] = mapped_column(String(255), index=True)  
-    variant: Mapped[str] = mapped_column(String(255), default="base")  
-    description: Mapped[str] = mapped_column(String(1024), default="")
-    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-class ModelVersion(Base):
-    __tablename__ = "model_versions"
-    __table_args__ = (UniqueConstraint("model_id", "version"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    model_id: Mapped[int] = mapped_column(ForeignKey("models.id"))
-    version: Mapped[int] = mapped_column(Integer)
-    s3_prefix: Mapped[str] = mapped_column(String(1024))
-    tags: Mapped[Dict] = mapped_column(JSON, default={})
-    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-class ModelAlias(Base):
-    __tablename__ = "model_aliases"
-    __table_args__ = (UniqueConstraint("model_id", "alias"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    model_id: Mapped[int] = mapped_column(ForeignKey("models.id"))
-    alias: Mapped[str] = mapped_column(String(64))
-    version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"))
-    updated_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 async def init_db():
     async with engine.begin() as conn:
