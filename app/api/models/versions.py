@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Header, Response, Cookie, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Header, Response, Cookie, Request, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 import tempfile
 import os
@@ -48,16 +48,22 @@ async def declare_version(
 @router.post("/models/{name}/versions/new")
 async def create_version(
     name: str,
-    version: int,
+    version_query: Optional[int] = Query(None),
+    version_form: Optional[int] = Form(None),
     files: List[UploadFile] = File(...),
     uid: int = Depends(current_user_id),
     db = Depends(get_db),
 ):
     """Create a new version by uploading files directly to the backend"""
+
+    version = version_query if version_query is not None else version_form
+    if version is None:
+        raise HTTPException(400, "Version not provided")
+
     m = (await db.execute(select(Model).where(Model.name == name))).scalar_one_or_none()
     if not m:
         raise HTTPException(404, "Model not found")
-    
+
     # Require that the client previously declared this version
     mv = (await db.execute(
         select(ModelVersion).where(
